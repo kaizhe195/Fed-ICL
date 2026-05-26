@@ -1,0 +1,18 @@
+dataset:
+  name: "truthful_qa"
+  split: "validation"
+
+experiment:
+  name: "truthfulqa_placeholder"
+  seed: 42
+  output_dir: "outputs/truthfulqa"
+  num_clients: 3
+  num_rounds: 1
+  alpha: 100.0
+
+llm:
+  backend: "mock"
+  model_name: "mock"
+
+aggregation:
+  method: "simple_select"

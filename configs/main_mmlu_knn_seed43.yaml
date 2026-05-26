@@ -1,0 +1,41 @@
+dataset:
+  name: "cais/mmlu"
+  split: "test"
+  fallback_split: "validation"
+  num_server_samples_per_subject: 5
+  max_subjects: 10
+
+experiment:
+  name: "main_mmlu_knn_seed43"
+  mode: "one_round_fed_icl"
+  seed: 43
+  seeds: [43]
+  output_dir: "outputs/main_mmlu_knn_seed43"
+  num_clients: 3
+  num_rounds: 1
+  alpha: 100.0
+  num_context_examples: 3
+  selection_method: "knn"
+  ordering_method: "similarity_desc"
+  use_local_filtering: true
+  local_filter_top_k: 50
+
+embedding:
+  model_name: "sentence-transformers/paraphrase-MiniLM-L6-v2"
+  text_key: "question"
+  batch_size: 32
+
+llm:
+  backend: "ollama"
+  model_name: "gemma3:1b"
+  base_url: "http://localhost:11434"
+  temperature: 0.0
+  max_tokens: 8
+  timeout_seconds: 120
+
+aggregation:
+  method: "majority_vote"
+
+evaluation:
+  save_per_subject_accuracy: true
+  save_per_round_predictions: true
