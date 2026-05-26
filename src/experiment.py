@@ -66,6 +66,7 @@ def run_mmlu_experiment(
     for index, (client_id, local_dataset) in enumerate(sorted(clients_data.items())):
         lm_client = create_lm_client(config.get("llm", {}), seed=seed + index)
         embedding_cfg = config.get("embedding", {})
+        local_filtering_cfg = config.get("local_filtering", {})
         clients.append(
             Client(
                 client_id=client_id,
@@ -76,6 +77,10 @@ def run_mmlu_experiment(
                 num_context_examples=int(experiment_cfg.get("num_context_examples", 5)),
                 use_local_filtering=bool(experiment_cfg.get("use_local_filtering", True)),
                 local_filter_top_k=int(experiment_cfg.get("local_filter_top_k", 50)),
+                local_filtering_enabled=bool(local_filtering_cfg.get("enabled", True)),
+                filter_top_k_per_query=int(local_filtering_cfg.get("filter_top_k_per_query", 5)),
+                max_filtered_examples=local_filtering_cfg.get("max_filtered_examples", 100),
+                local_filtering_scoring=str(local_filtering_cfg.get("scoring", "max_similarity")),
                 text_key=embedding_cfg.get("text_key", "question"),
                 embedding_model_name=embedding_cfg.get(
                     "model_name", "sentence-transformers/paraphrase-MiniLM-L6-v2"

@@ -115,6 +115,9 @@ class Server:
         save_json(self._sanitized_global_context(), self.output_dir / "predictions" / "final_global_context.json")
         save_jsonl(self.selection_records, self.output_dir / "selected_examples.jsonl")
         save_jsonl(self.round_prediction_records, self.output_dir / "round_predictions.jsonl")
+        filtered_summaries = self._filtered_pool_summaries()
+        if filtered_summaries:
+            save_json(filtered_summaries, self.output_dir / "filtered_pool_summary.json")
         return final_metrics
 
     def _update_global_context(self, predictions: dict[str, str]) -> None:
@@ -135,6 +138,13 @@ class Server:
                 "predicted_answer": str(item["answer"]),
             }
             for item in self.global_context
+        ]
+
+    def _filtered_pool_summaries(self) -> list[dict[str, Any]]:
+        return [
+            summary
+            for client in self.clients
+            if (summary := getattr(client, "filtered_pool_summary", None)) is not None
         ]
 
     def _round_prediction_records(

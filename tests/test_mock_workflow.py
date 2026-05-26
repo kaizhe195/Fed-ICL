@@ -59,6 +59,17 @@ def _server_queries() -> list[dict]:
     return [_fake_example(0, "math", "A"), _fake_example(1, "history", "B")]
 
 
+def _selection_example(index: int, question: str, answer: str = "A") -> dict:
+    return {
+        "id": f"example_{index}",
+        "subject": "demo",
+        "question": question,
+        "choices": ["Choice A", "Choice B", "Choice C", "Choice D"],
+        "answer": answer,
+        "answer_index": ["A", "B", "C", "D"].index(answer),
+    }
+
+
 def _run_server(tmp_path: Path, mode: str, num_rounds: int = 2) -> tuple[dict, list[RecordingLMClient]]:
     clients, lms = _make_clients()
     server = Server(
@@ -74,6 +85,13 @@ def _run_server(tmp_path: Path, mode: str, num_rounds: int = 2) -> tuple[dict, l
 
 def _load_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _disable_embedding_index(monkeypatch):
+    def fail_to_create_index(self):
+        raise RuntimeError("embeddings disabled for test")
+
+    monkeypatch.setattr(Client, "_create_embedding_index", fail_to_create_index)
 
 
 def test_one_round_fed_icl_runs_once_and_uses_original_dataset(tmp_path: Path):
@@ -107,6 +125,94 @@ def test_zero_context_baseline_uses_no_context_examples(tmp_path: Path):
     prompts = [prompt for lm in lms for prompt in lm.prompts]
     assert len(prompts) == 4
     assert all(prompt.count("Question:") == 1 for prompt in prompts)
+
+
+def test_random_selection_uses_full_local_pool():
+    client = Client(
+        client_id="client_random",
+        local_dataset=[
+            _selection_example(0, "linear algebra vector"),
+            _selection_example(1, "ancient history empire"),
+            _selection_example(2, "biology cell"),
+        ],
+        lm_client=RecordingLMClient("A"),
+        selection_method="random",
+        ordering_method="original",
+        num_context_examples=2,
+        seed=7,
+    )
+
+    client.answer_with_original_dataset([_selection_example(10, "linear algebra question")])
+
+    record = client.last_selection_records[0]
+    assert record["candidate_pool"] == "full_local_pool"
+    assert set(record["selected_example_ids"]) <= {"example_0", "example_1", "example_2"}
+    assert client.filtered_local_pool is None
+
+
+def test_basic_knn_selection_uses_full_local_pool_similarity(monkeypatch):
+    _disable_embedding_index(monkeypatch)
+    client = Client(
+        client_id="client_basic_knn",
+        local_dataset=[
+            _selection_example(0, "ancient history empire"),
+            _selection_example(1, "linear algebra vector space"),
+            _selection_example(2, "biology cell"),
+        ],
+        lm_client=RecordingLMClient("A"),
+        selection_method="basic_knn",
+        ordering_method="similarity_desc",
+        num_context_examples=1,
+        seed=7,
+    )
+
+    client.answer_with_original_dataset([_selection_example(10, "linear algebra vector")])
+
+    record = client.last_selection_records[0]
+    assert record["candidate_pool"] == "full_local_pool"
+    assert record["selected_example_ids"] == ["example_1"]
+    assert client.filtered_local_pool is None
+
+
+def test_knn_selection_creates_and_uses_filtered_local_pool(monkeypatch):
+    _disable_embedding_index(monkeypatch)
+    server_queries = [
+        _selection_example(10, "linear algebra vector"),
+        _selection_example(11, "world history empire"),
+    ]
+    client = Client(
+        client_id="client_knn",
+        local_dataset=[
+            _selection_example(0, "linear algebra vector space"),
+            _selection_example(1, "world history ancient empire"),
+            _selection_example(2, "biology cell membrane"),
+            _selection_example(3, "chemistry molecule bond"),
+        ],
+        lm_client=RecordingLMClient("A"),
+        selection_method="knn",
+        ordering_method="similarity_desc",
+        num_context_examples=1,
+        filter_top_k_per_query=1,
+        max_filtered_examples=2,
+        seed=7,
+    )
+
+    client.answer_with_original_dataset(server_queries)
+
+    filtered_ids = {str(example["id"]) for example in client.filtered_local_pool or []}
+    assert filtered_ids == {"example_0", "example_1"}
+    assert client.filtered_pool_summary == {
+        "client_id": "client_knn",
+        "original_pool_size": 4,
+        "filtered_pool_size": 2,
+        "filter_top_k_per_query": 1,
+        "max_filtered_examples": 2,
+        "num_server_queries": 2,
+        "scoring": "max_similarity",
+    }
+    assert all(record["candidate_pool"] == "filtered_local_pool" for record in client.last_selection_records)
+    for record in client.last_selection_records:
+        assert set(record["selected_example_ids"]) <= filtered_ids
 
 
 def test_fed_icl_runs_multiple_rounds(tmp_path: Path):
@@ -213,6 +319,57 @@ def test_selected_examples_are_saved_with_query_and_selection_details(tmp_path: 
     assert isinstance(first["selected_example_ids"], list)
     assert isinstance(first["selected_example_texts"], list)
     assert isinstance(first["selected_example_labels"], list)
+    assert first["candidate_pool"] == "full_local_pool"
+
+
+def test_knn_server_writes_filtered_pool_summary_and_multiround_outputs(tmp_path: Path, monkeypatch):
+    _disable_embedding_index(monkeypatch)
+    clients = [
+        Client(
+            client_id="client_knn",
+            local_dataset=[
+                _selection_example(0, "linear algebra vector space"),
+                _selection_example(1, "world history ancient empire"),
+                _selection_example(2, "biology cell membrane"),
+            ],
+            lm_client=RecordingLMClient("A"),
+            selection_method="knn",
+            ordering_method="similarity_desc",
+            num_context_examples=1,
+            filter_top_k_per_query=1,
+            max_filtered_examples=2,
+            seed=7,
+        )
+    ]
+    server = Server(
+        server_queries=[
+            _selection_example(10, "linear algebra vector"),
+            _selection_example(11, "world history empire"),
+        ],
+        clients=clients,
+        num_rounds=3,
+        output_dir=tmp_path,
+        seed=3,
+        mode="lite_multiround_fed_icl",
+    )
+
+    metrics = server.run()
+
+    assert metrics["num_rounds"] == 3
+    csv_lines = (tmp_path / "per_round_metrics.csv").read_text(encoding="utf-8").splitlines()
+    assert len(csv_lines) == 4
+    assert (tmp_path / "round_predictions.jsonl").exists()
+    summary = json.loads((tmp_path / "filtered_pool_summary.json").read_text(encoding="utf-8"))
+    assert summary[0]["client_id"] == "client_knn"
+    assert summary[0]["filtered_pool_size"] <= summary[0]["original_pool_size"]
+    selected_rows = _load_jsonl(tmp_path / "selected_examples.jsonl")
+    filtered_ids = {str(example["id"]) for example in clients[0].filtered_local_pool or []}
+    assert all(row["candidate_pool"] == "filtered_local_pool" for row in selected_rows)
+    assert all(set(row["selected_example_ids"]) <= filtered_ids for row in selected_rows)
+    prompts = clients[0].lm_client.prompts
+    assert not any("previous server aggregated answer" in prompt.lower() for prompt in prompts[:2])
+    assert all("The previous server aggregated answer was:" in prompt for prompt in prompts[2:])
+    assert all("The previous client vote counts were:" in prompt for prompt in prompts[2:])
 
 
 def test_root_level_metrics_files_are_saved(tmp_path: Path):

@@ -30,7 +30,7 @@ def select_examples(
     if method == "random":
         selected = rng.sample(local_examples, k=min(num_examples, len(local_examples)))
         return [(example, 0.0) for example in selected]
-    if method == "knn":
+    if method in {"knn", "basic_knn"}:
         if embedding_index is not None:
             return embedding_index.search(str(query_example.get(text_key, "")), num_examples)
         scored = [

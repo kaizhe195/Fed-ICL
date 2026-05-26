@@ -62,7 +62,25 @@ def test_multiround_configs_use_lite_mode_and_requested_limits():
         assert config["llm"]["backend"] == "ollama"
 
 
-def test_random_and_knn_selection_methods_still_select_examples():
+def test_knn_configs_define_local_filtering_defaults():
+    for relative_path in [
+        "configs/default_mmlu.yaml",
+        "configs/selection_knn_mmlu.yaml",
+        "configs/main_mmlu_knn_seed42.yaml",
+        "configs/main_mmlu_knn_seed43.yaml",
+        "configs/main_mmlu_knn_seed44.yaml",
+        "configs/multiround_mmlu_knn_seed42.yaml",
+    ]:
+        config = load_yaml(PROJECT_ROOT / relative_path)
+        assert config["local_filtering"] == {
+            "enabled": True,
+            "filter_top_k_per_query": 5,
+            "max_filtered_examples": 100,
+            "scoring": "max_similarity",
+        }
+
+
+def test_random_and_basic_knn_selection_methods_still_select_examples():
     query = {"id": "q", "question": "linear algebra vector space"}
     examples = [
         {"id": "a", "question": "ancient history empire"},
@@ -71,10 +89,10 @@ def test_random_and_knn_selection_methods_still_select_examples():
     ]
 
     random_selected = select_examples(query, examples, 2, "random", random.Random(1))
-    knn_selected = select_examples(query, examples, 2, "knn", random.Random(1), None)
+    basic_knn_selected = select_examples(query, examples, 2, "basic_knn", random.Random(1), None)
 
     assert len(random_selected) == 2
-    assert [example["id"] for example, _ in knn_selected][0] == "b"
+    assert [example["id"] for example, _ in basic_knn_selected][0] == "b"
 
 
 def test_main_experiment_configs_use_real_backend_and_single_round():

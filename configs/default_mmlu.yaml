@@ -24,6 +24,12 @@ embedding:
   text_key: "question"
   batch_size: 32
 
+local_filtering:
+  enabled: true
+  filter_top_k_per_query: 5
+  max_filtered_examples: 100
+  scoring: "max_similarity"
+
 llm:
   backend: "mock"
   model_name: "mock"

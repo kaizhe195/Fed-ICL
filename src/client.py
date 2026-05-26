@@ -27,11 +27,19 @@ class Client:
     num_context_examples: int = 5
     use_local_filtering: bool = True
     local_filter_top_k: int = 50
+    local_filtering_enabled: bool = True
+    filter_top_k_per_query: int = 5
+    max_filtered_examples: int | None = 100
+    local_filtering_scoring: str = "max_similarity"
     text_key: str = "question"
     embedding_model_name: str = "sentence-transformers/paraphrase-MiniLM-L6-v2"
     embedding_batch_size: int = 32
     seed: int = 42
     embedding_index: EmbeddingIndex | None = None
+    filtered_query_index: EmbeddingIndex | None = None
+    filtered_local_pool: list[dict[str, Any]] | None = None
+    filtered_pool_max_scores: dict[str, float] = field(default_factory=dict, init=False)
+    filtered_pool_summary: dict[str, Any] | None = field(default=None, init=False)
     last_selection_records: list[dict[str, Any]] = field(default_factory=list, init=False)
     rng: random.Random = field(init=False)
     logger: logging.Logger = field(init=False)
@@ -51,21 +59,99 @@ class Client:
         )
         return fallback
 
+    def _create_embedding_index(self) -> EmbeddingIndex:
+        return EmbeddingIndex(
+            model_name=self.embedding_model_name,
+            batch_size=self.embedding_batch_size,
+        )
+
     def _build_index_if_needed(self, examples: list[dict[str, Any]]) -> EmbeddingIndex | None:
-        if self.selection_method != "knn":
+        if self.selection_method not in {"knn", "basic_knn"}:
             return None
         if self.embedding_index is None:
             try:
-                self.embedding_index = EmbeddingIndex(
-                    model_name=self.embedding_model_name,
-                    batch_size=self.embedding_batch_size,
-                )
+                self.embedding_index = self._create_embedding_index()
                 self.embedding_index.build_index(examples, self.text_key)
             except Exception:
                 self.embedding_index = None
         elif self.embedding_index.examples != examples:
             self.embedding_index.build_index(examples, self.text_key)
         return self.embedding_index
+
+    def prepare_filtered_local_pool(self, server_queries: list[dict[str, Any]]) -> None:
+        """Prepare the paper-aligned filtered local pool used by selection_method=knn."""
+        if self.selection_method != "knn" or self.filtered_local_pool is not None:
+            return
+        if not self.local_filtering_enabled:
+            self.filtered_local_pool = list(self.local_dataset)
+            self.filtered_pool_max_scores = {str(example.get("id", "")): 0.0 for example in self.filtered_local_pool}
+            self.filtered_query_index = self._build_query_index(self.filtered_local_pool)
+            self._set_filtered_pool_summary(len(server_queries))
+            return
+
+        retained: dict[str, tuple[dict[str, Any], float]] = {}
+        full_index = self._build_filter_index(self.local_dataset)
+        for query in server_queries:
+            query_text = str(query.get(self.text_key, ""))
+            if full_index is not None:
+                selected = full_index.search(query_text, self.filter_top_k_per_query)
+            else:
+                selected = self._lexical_top_k(query, self.local_dataset, self.filter_top_k_per_query)
+            for example, score in selected:
+                example_id = str(example.get("id", ""))
+                if not example_id:
+                    continue
+                previous = retained.get(example_id)
+                if previous is None or score > previous[1]:
+                    retained[example_id] = (example, float(score))
+
+        ranked = sorted(retained.values(), key=lambda item: item[1], reverse=True)
+        if self.max_filtered_examples is not None:
+            ranked = ranked[: max(0, int(self.max_filtered_examples))]
+        self.filtered_local_pool = [example for example, _ in ranked]
+        self.filtered_pool_max_scores = {
+            str(example.get("id", "")): float(score)
+            for example, score in ranked
+        }
+        self.filtered_query_index = self._build_query_index(self.filtered_local_pool)
+        self._set_filtered_pool_summary(len(server_queries))
+
+    def _build_filter_index(self, examples: list[dict[str, Any]]) -> EmbeddingIndex | None:
+        if not examples:
+            return None
+        try:
+            index = self._create_embedding_index()
+            index.build_index(examples, self.text_key)
+            return index
+        except Exception:
+            return None
+
+    def _lexical_top_k(
+        self,
+        query: dict[str, Any],
+        examples: list[dict[str, Any]],
+        top_k: int,
+    ) -> list[tuple[dict[str, Any], float]]:
+        if top_k <= 0 or not examples:
+            return []
+        scored = [
+            (example, lexical_similarity(str(query.get(self.text_key, "")), str(example.get(self.text_key, ""))))
+            for example in examples
+        ]
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[: min(top_k, len(scored))]
+
+    def _set_filtered_pool_summary(self, num_server_queries: int) -> None:
+        filtered_size = len(self.filtered_local_pool or [])
+        self.filtered_pool_summary = {
+            "client_id": self.client_id,
+            "original_pool_size": len(self.local_dataset),
+            "filtered_pool_size": filtered_size,
+            "filter_top_k_per_query": self.filter_top_k_per_query,
+            "max_filtered_examples": self.max_filtered_examples,
+            "num_server_queries": num_server_queries,
+            "scoring": self.local_filtering_scoring,
+        }
 
     def filter_local_dataset(self, server_queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Retain local examples relevant to the server query set without exposing them."""
@@ -126,7 +212,13 @@ class Client:
         """Return only predictions for server query ids."""
         predictions: list[dict[str, str]] = []
         self.last_selection_records = []
-        query_index = self._build_query_index(relabeled_dataset) if not zero_context else None
+        candidate_examples = relabeled_dataset
+        candidate_pool = "full_local_pool"
+        if self.selection_method == "knn" and not zero_context:
+            self.prepare_filtered_local_pool(server_queries)
+            candidate_examples = self.filtered_local_pool or []
+            candidate_pool = "filtered_local_pool"
+        query_index = self._query_index_for_candidate_pool(candidate_examples, candidate_pool, zero_context)
         for query in server_queries:
             if zero_context:
                 context_examples: list[dict[str, Any]] = []
@@ -134,7 +226,7 @@ class Client:
             else:
                 selected = select_examples(
                     query,
-                    relabeled_dataset,
+                    candidate_examples,
                     self.num_context_examples,
                     self.selection_method,
                     self.rng,
@@ -147,7 +239,8 @@ class Client:
                 self._selection_record(
                     query=query,
                     ordered_selected=ordered_selected,
-                    similarity_scores_available=(self.selection_method == "knn"),
+                    similarity_scores_available=(self.selection_method in {"knn", "basic_knn"}),
+                    candidate_pool=candidate_pool,
                 )
             )
             query_id = str(query["id"])
@@ -172,6 +265,18 @@ class Client:
                 }
             )
         return predictions
+
+    def _query_index_for_candidate_pool(
+        self,
+        candidate_examples: list[dict[str, Any]],
+        candidate_pool: str,
+        zero_context: bool,
+    ) -> EmbeddingIndex | None:
+        if zero_context:
+            return None
+        if self.selection_method == "knn" and candidate_pool == "filtered_local_pool":
+            return self.filtered_query_index
+        return self._build_query_index(candidate_examples)
 
     def answer_with_original_dataset(
         self,
@@ -212,12 +317,14 @@ class Client:
         query: dict[str, Any],
         ordered_selected: list[tuple[dict[str, Any], float]],
         similarity_scores_available: bool,
+        candidate_pool: str,
     ) -> dict[str, Any]:
         return {
             "query_id": str(query.get("id", "")),
             "query_text": str(query.get(self.text_key, "")),
             "client_id": self.client_id,
             "selection_method": self.selection_method,
+            "candidate_pool": candidate_pool,
             "selected_example_ids": [str(example.get("id", "")) for example, _ in ordered_selected],
             "selected_example_texts": [str(example.get(self.text_key, "")) for example, _ in ordered_selected],
             "selected_example_labels": [str(example.get("answer", "")) for example, _ in ordered_selected],
@@ -228,13 +335,10 @@ class Client:
         }
 
     def _build_query_index(self, examples: list[dict[str, Any]]) -> EmbeddingIndex | None:
-        if self.selection_method != "knn" or not examples:
+        if self.selection_method not in {"knn", "basic_knn"} or not examples:
             return None
         try:
-            index = EmbeddingIndex(
-                model_name=self.embedding_model_name,
-                batch_size=self.embedding_batch_size,
-            )
+            index = self._create_embedding_index()
             index.build_index(examples, self.text_key)
             return index
         except Exception:
