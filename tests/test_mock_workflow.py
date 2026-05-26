@@ -86,7 +86,18 @@ def test_one_round_fed_icl_runs_once_and_uses_original_dataset(tmp_path: Path):
     prompts = [prompt for lm in lms for prompt in lm.prompts]
     assert len(prompts) == 4
     assert all(prompt.count("Question:") == 2 for prompt in prompts)
-    assert not any("Previous server aggregated answer:" in prompt for prompt in prompts)
+    assert not any("previous server aggregated answer" in prompt.lower() for prompt in prompts)
+    assert not any("previous client vote counts" in prompt.lower() for prompt in prompts)
+
+
+def test_lite_multiround_single_round_has_no_refinement_prompt(tmp_path: Path):
+    metrics, lms = _run_server(tmp_path, mode="lite_multiround_fed_icl", num_rounds=1)
+
+    assert metrics["num_rounds"] == 1
+    prompts = [prompt for lm in lms for prompt in lm.prompts]
+    assert len(prompts) == 4
+    assert not any("previous server aggregated answer" in prompt.lower() for prompt in prompts)
+    assert not any("previous client vote counts" in prompt.lower() for prompt in prompts)
 
 
 def test_zero_context_baseline_uses_no_context_examples(tmp_path: Path):
@@ -132,12 +143,15 @@ def test_lite_multiround_saves_detailed_round_predictions(tmp_path: Path):
         "client_answers",
         "aggregated_answer",
         "vote_counts",
+        "previous_vote_counts_used",
         "gold_answer",
         "is_correct",
         "answer_changed_from_previous_round",
     } <= set(first.keys())
     assert first["answer_changed_from_previous_round"] is None
+    assert first["previous_vote_counts_used"] is None
     assert any(row["round"] == 2 and isinstance(row["answer_changed_from_previous_round"], bool) for row in rows)
+    assert any(row["round"] == 2 and row["previous_vote_counts_used"] == {"A": 1, "B": 1, "C": 0, "D": 0} for row in rows)
 
 
 def test_refinement_round_prompts_include_previous_aggregated_answer(tmp_path: Path):
@@ -146,9 +160,11 @@ def test_refinement_round_prompts_include_previous_aggregated_answer(tmp_path: P
     prompts = [prompt for lm in lms for prompt in lm.prompts]
     assert len(prompts) == 8
     for lm in lms:
-        assert not any("Previous server aggregated answer:" in prompt for prompt in lm.prompts[:2])
-        assert all("Previous server aggregated answer:" in prompt for prompt in lm.prompts[2:])
-        assert all("Previous vote counts:" in prompt for prompt in lm.prompts[2:])
+        assert not any("previous server aggregated answer" in prompt.lower() for prompt in lm.prompts[:2])
+        assert not any("previous client vote counts" in prompt.lower() for prompt in lm.prompts[:2])
+        assert all("The previous server aggregated answer was:" in prompt for prompt in lm.prompts[2:])
+        assert all("The previous client vote counts were: A:1, B:1, C:0, D:0." in prompt for prompt in lm.prompts[2:])
+        assert all("This previous answer may be correct or incorrect." in prompt for prompt in lm.prompts[2:])
 
 
 def test_prediction_outputs_do_not_contain_raw_questions_or_choices(tmp_path: Path):

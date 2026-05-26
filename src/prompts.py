@@ -35,6 +35,12 @@ def build_mmlu_prompt(context_examples: list[dict[str, Any]], query_example: dic
     return "\n\n".join(parts)
 
 
+def format_vote_counts(vote_counts: dict[str, int] | None) -> str:
+    """Format MMLU vote counts in stable A-D order."""
+    counts = vote_counts or {}
+    return ", ".join(f"{letter}:{int(counts.get(letter, 0))}" for letter in ANSWER_LETTERS)
+
+
 def build_mmlu_refinement_prompt(
     context_examples: list[dict[str, Any]],
     query_example: dict[str, Any],
@@ -49,17 +55,19 @@ def build_mmlu_refinement_prompt(
         )
     instruction = (
         "This is a refinement round for an MMLU multiple-choice question. "
-        "Review the local examples and the previous server aggregated answer. "
-        "Keep the previous answer if it seems correct, or change it if the local examples "
-        "suggest a better answer. Reply with only one letter: A, B, C, or D."
+        "Use the local examples and the question carefully."
     )
     parts = [instruction]
     for example in context_examples:
         parts.append(format_mmlu_example(example, include_answer=True))
-    previous_lines = [f"Previous server aggregated answer: {previous_aggregated_answer}"]
-    if previous_vote_counts:
-        counts = ", ".join(f"{letter}: {int(previous_vote_counts.get(letter, 0))}" for letter in ANSWER_LETTERS)
-        previous_lines.append(f"Previous vote counts: {counts}")
-    parts.append("\n".join(previous_lines))
+    previous_context = (
+        f"The previous server aggregated answer was: {previous_aggregated_answer}.\n"
+        f"The previous client vote counts were: {format_vote_counts(previous_vote_counts)}.\n\n"
+        "This previous answer may be correct or incorrect. Use the local examples and the question carefully. "
+        "If the previous answer seems correct, keep it. If your local examples or reasoning suggest a better "
+        "option, change the answer.\n\n"
+        "Answer with only one letter: A, B, C, or D."
+    )
+    parts.append(previous_context)
     parts.append(format_mmlu_example(query_example, include_answer=False))
     return "\n\n".join(parts)

@@ -96,6 +96,7 @@ class Server:
                     final_predictions,
                     final_vote_counts,
                     previous_predictions,
+                    previous_vote_counts,
                 )
             )
             save_round_predictions(final_predictions, final_vote_counts, round_index, self.output_dir)
@@ -143,6 +144,7 @@ class Server:
         aggregated_predictions: dict[str, str],
         vote_counts: dict[str, dict[str, int]],
         previous_predictions: dict[str, str],
+        previous_vote_counts: dict[str, dict[str, int]],
     ) -> list[dict[str, Any]]:
         """Build detailed per-query prediction records for analysis."""
         client_answers_by_query: dict[str, dict[str, str]] = {}
@@ -159,6 +161,7 @@ class Server:
             aggregated_answer = aggregated_predictions.get(query_id, "")
             gold_answer = str(query.get("answer", ""))
             previous_answer = previous_predictions.get(query_id)
+            previous_counts = previous_vote_counts.get(query_id)
             rows.append(
                 {
                     "round": round_index,
@@ -167,6 +170,7 @@ class Server:
                     "client_answers": client_answers_by_query.get(query_id, {}),
                     "aggregated_answer": aggregated_answer,
                     "vote_counts": vote_counts.get(query_id, {}),
+                    "previous_vote_counts_used": previous_counts,
                     "gold_answer": gold_answer,
                     "is_correct": aggregated_answer == gold_answer,
                     "answer_changed_from_previous_round": None
